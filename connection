@@ -1,0 +1,1 @@
+mongo --ssl --host <url:port> --sslCAFile global-bundle.pem --username mongodb --password <password>
