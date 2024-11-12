@@ -1,0 +1,211 @@
+Here's a design for setting up the requested MongoDB collections and APIs using Python and Flask. We’ll also configure it to use AWS-hosted MongoDB with TLS. I’ll outline each collection, the necessary API endpoints, and the authentication setup.
+
+MongoDB Collections
+user_collection:
+
+Holds user credentials, roles, and active status.
+json
+Copy code
+{
+  "_id": "unique_user_id",
+  "username": "user_name",
+  "password_hash": "hashed_password",
+  "category": "infra | pmo | admin",
+  "isactive": true
+}
+deployment_schedule:
+
+Stores deployment schedules for different environments and instances.
+json
+Copy code
+{
+  "_id": "unique_schedule_id",
+  "environment": "qa | stage | live",
+  "instance": "lex | isb | wingspan | b2c",
+  "type": "deployment_type",
+  "startdatetime": "start_date_and_time",
+  "enddatetime": "end_date_and_time",
+  "sprint": "sprint_number",
+  "userid": "user_id",
+  "isactive": true
+}
+exception_collection:
+
+Handles exceptions with approver email details.
+json
+Copy code
+{
+  "_id": "unique_exception_id",
+  "environment": "qa | stage | live",
+  "instance": "lex | isb | wingspan | b2c",
+  "type": "exception_type",
+  "startdatetime": "start_date_and_time",
+  "enddatetime": "end_date_and_time",
+  "sprint": "sprint_number",
+  "userid": "user_id",
+  "isactive": true,
+  "approver_emailid": "approver_email@example.com"
+}
+API Setup with Flask
+Let's start by defining the APIs. Below is the basic structure to achieve this in Flask.
+
+Requirements
+Install required libraries:
+
+bash
+Copy code
+pip install flask pymongo bcrypt flask-jwt-extended
+Flask App with MongoDB Configuration and API Endpoints
+Here’s a setup for handling authentication, user management, and deployment scheduling.
+
+python
+Copy code
+from flask import Flask, request, jsonify
+from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity
+from pymongo import MongoClient
+from datetime import datetime, timedelta
+from bson.objectid import ObjectId
+import bcrypt
+
+app = Flask(__name__)
+app.config["JWT_SECRET_KEY"] = "your_jwt_secret"  # Change to a secure secret key
+jwt = JWTManager(app)
+
+# MongoDB Configuration
+client = MongoClient("mongodb+srv://<username>:<password>@your-mongodb-instance.mongodb.net/test?tls=true", tlsCAFile='/path/to/ca-certificate')  # Add your certificate path
+db = client["your_database"]
+
+### Utility Functions
+def hash_password(password):
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt())
+
+def verify_password(password, hashed):
+    return bcrypt.checkpw(password.encode('utf-8'), hashed)
+
+### 1. Login Endpoint (Token Generation)
+@app.route("/login", methods=["POST"])
+def login():
+    data = request.get_json()
+    username = data.get("username")
+    password = data.get("password")
+    
+    user = db.user_collection.find_one({"username": username, "isactive": True})
+    if user and verify_password(password, user["password_hash"]):
+        access_token = create_access_token(identity=str(user["_id"]), expires_delta=timedelta(hours=2))
+        return jsonify({"token": access_token}), 200
+    return jsonify({"error": "Invalid username or password"}), 401
+
+### 2. Admin: Add, Edit, Delete User
+@app.route("/user", methods=["POST", "PUT", "DELETE"])
+@jwt_required()
+def manage_user():
+    current_user_id = get_jwt_identity()
+    user = db.user_collection.find_one({"_id": ObjectId(current_user_id)})
+    if user["category"] != "admin":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json()
+    if request.method == "POST":
+        new_user = {
+            "username": data["username"],
+            "password_hash": hash_password(data["password"]),
+            "category": data["category"],
+            "isactive": data.get("isactive", True)
+        }
+        db.user_collection.insert_one(new_user)
+        return jsonify({"message": "User created successfully"}), 201
+
+    elif request.method == "PUT":
+        db.user_collection.update_one(
+            {"_id": ObjectId(data["_id"])},
+            {"$set": {
+                "username": data["username"],
+                "password_hash": hash_password(data["password"]),
+                "category": data["category"],
+                "isactive": data.get("isactive", True)
+            }}
+        )
+        return jsonify({"message": "User updated successfully"}), 200
+
+    elif request.method == "DELETE":
+        db.user_collection.delete_one({"_id": ObjectId(data["_id"])})
+        return jsonify({"message": "User deleted successfully"}), 200
+
+### 3. PMO: Add, Edit Deployment Schedule and Exception
+@app.route("/schedule", methods=["POST", "PUT"])
+@jwt_required()
+def manage_schedule():
+    current_user_id = get_jwt_identity()
+    user = db.user_collection.find_one({"_id": ObjectId(current_user_id)})
+    if user["category"] != "pmo":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json()
+    schedule = {
+        "environment": data["environment"],
+        "instance": data["instance"],
+        "type": data["type"],
+        "startdatetime": data["startdatetime"],
+        "enddatetime": data["enddatetime"],
+        "sprint": data["sprint"],
+        "userid": current_user_id,
+        "isactive": data.get("isactive", True)
+    }
+
+    if request.method == "POST":
+        db.deployment_schedule.insert_one(schedule)
+        return jsonify({"message": "Schedule created successfully"}), 201
+    elif request.method == "PUT":
+        db.deployment_schedule.update_one(
+            {"_id": ObjectId(data["_id"])},
+            {"$set": schedule}
+        )
+        return jsonify({"message": "Schedule updated successfully"}), 200
+
+@app.route("/exception", methods=["POST", "PUT"])
+@jwt_required()
+def manage_exception():
+    current_user_id = get_jwt_identity()
+    user = db.user_collection.find_one({"_id": ObjectId(current_user_id)})
+    if user["category"] != "pmo":
+        return jsonify({"error": "Unauthorized"}), 403
+
+    data = request.get_json()
+    exception = {
+        "environment": data["environment"],
+        "instance": data["instance"],
+        "type": data["type"],
+        "startdatetime": data["startdatetime"],
+        "enddatetime": data["enddatetime"],
+        "sprint": data["sprint"],
+        "userid": current_user_id,
+        "isactive": data.get("isactive", True),
+        "approver_emailid": data["approver_emailid"]
+    }
+
+    if request.method == "POST":
+        db.exception_collection.insert_one(exception)
+        return jsonify({"message": "Exception created successfully"}), 201
+    elif request.method == "PUT":
+        db.exception_collection.update_one(
+            {"_id": ObjectId(data["_id"])},
+            {"$set": exception}
+        )
+        return jsonify({"message": "Exception updated successfully"}), 200
+
+if __name__ == "__main__":
+    app.run(debug=True)
+Explanation of the Code
+Login API (/login):
+
+Accepts username and password, verifies them, and generates a JWT token with a 2-hour expiration if the credentials are valid.
+User Management (/user):
+
+Accessible only to users with the admin category.
+Allows admins to add, edit, or delete users.
+Deployment Schedule and Exception Management (/schedule, /exception):
+
+Accessible only to users with the pmo category.
+PMO members can add or edit schedules and exceptions.
+MongoDB Connection with AWS TLS
+In the MongoDB connection URI, you need to include TLS settings and specify the CA certificate file to enable a secure connection to your MongoDB Atlas.
